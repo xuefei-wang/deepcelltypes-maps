@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "deepcelltypes-maps"
+version = "0.1.0"
+description = "MAPS 4-layer MLP baseline for cell type classification"
+requires-python = ">=3.11"
+dependencies = [
+    "deepcelltypes @ git+https://github.com/xuefei-wang/deepcelltypes-cell-type-assignment-pytorch.git",
+    "torch",
+    "click",
+    "numpy",
+    "pandas",
+    "tqdm",
+    "scikit-learn",
+]
