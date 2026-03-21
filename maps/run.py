@@ -278,7 +278,7 @@ def main(
     # Load config
     dct_config = TissueNetConfig(zarr_dir)
     num_classes = dct_config.NUM_CELLTYPES
-    input_dim = dct_config.NUM_MARKERS  # 271 features (globally aligned mean intensity per marker)
+    input_dim = dct_config.NUM_MARKERS  # 269 features (globally aligned mean intensity per marker)
 
     print(f"Loading data from {zarr_dir}")
     print(f"Number of cell types: {num_classes}")
