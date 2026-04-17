@@ -9,3 +9,4 @@ build/
 wandb_tmp/
 models/
 output/
+uv.lock
