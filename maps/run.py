@@ -10,6 +10,7 @@ Reference:
 """
 
 import os
+import random
 import click
 import numpy as np
 from pathlib import Path
@@ -23,7 +24,7 @@ from maps.model import MAPSModel
 # Default data directory from environment
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data2"))
 
-from deepcelltypes.config import TissueNetConfig, CELL_TYPE_HIERARCHY
+from deepcelltypes.config import TissueNetConfig
 from deepcelltypes.utils import (
     compute_baseline_metrics,
     save_baseline_predictions,
@@ -31,21 +32,28 @@ from deepcelltypes.utils import (
 )
 
 
+def set_seed(seed: int) -> None:
+    """Match canonical mahmoodlab/MAPS trainer.set_seed (seed=7325111 default)."""
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
 def compute_class_weights(y: np.ndarray) -> np.ndarray:
     """
-    Compute class weights for WeightedRandomSampler.
-
-    Args:
-        y: (N,) labels
-
-    Returns:
-        sample_weights: (N,) weight for each sample
+    Per-sample weights for canonical mahmoodlab/MAPS class balancing:
+    `weight_per_class = n / count(c)` (full inverse frequency).
     """
     class_counts = np.bincount(y)
-    # Sqrt-inverse frequency weighting (less aggressive than full inverse,
-    # matches transformer baseline's WeightedRandomSampler approach)
-    class_weights = 1.0 / (np.sqrt(class_counts) + 1e-8)
-    sample_weights = class_weights[y]
+    n = float(len(y))
+    weight_per_class = np.where(class_counts > 0, n / class_counts, 0.0)
+    sample_weights = weight_per_class[y]
     return sample_weights
 
 
@@ -55,7 +63,7 @@ def normalize_features(
     std: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Z-score normalize features.
+    Z-score normalize then divide by 255 (canonical mahmoodlab/MAPS datasets.py:70).
 
     Args:
         X: (N, D) feature matrix
@@ -75,7 +83,7 @@ def normalize_features(
     # Avoid division by zero
     std = np.where(std == 0, 1.0, std)
 
-    X_norm = (X - mean) / std
+    X_norm = ((X - mean) / std) / 255.0
     return X_norm, mean, std
 
 
@@ -207,8 +215,8 @@ def evaluate(
 @click.option(
     "--min_epochs",
     type=int,
-    default=250,
-    help="Minimum epochs before early stopping",
+    default=100,
+    help="Minimum epochs before early stopping (canonical mahmoodlab/MAPS published recipes use 50 for cHL1, 100 for others)",
 )
 @click.option(
     "--max_epochs",
@@ -219,13 +227,12 @@ def evaluate(
 @click.option(
     "--patience",
     type=int,
-    default=100,
-    help="Early stopping patience (epochs without improvement)",
+    default=50,
+    help="Early stopping patience (canonical mahmoodlab/MAPS published recipes use 20 for cHL1, 50 for others)",
 )
-@click.option("--split_mode", type=click.Choice(["fov", "patch"]), default="fov",
-              help="Split strategy: 'fov' (default, no spatial leakage) or 'patch' (cell-level random)")
+@click.option("--seed", type=int, default=7325111, help="Random seed (canonical mahmoodlab/MAPS default)")
 @click.option("--split_file", type=str, default=None,
-              help="Path to pre-computed FOV split JSON (overrides split_mode/seed for splitting)")
+              help="Path to pre-computed FOV split JSON (required)")
 @click.option("--features_cache", type=str, default=None,
               help="Path to cache extracted features (.npz). Reuses cache if it exists.")
 @click.option("--min_channels", type=int, default=3, help="Min non-DAPI channels per dataset (filters 2-channel datasets)")
@@ -243,12 +250,15 @@ def main(
     min_epochs: int,
     max_epochs: int,
     patience: int,
-    split_mode: str,
+    seed: int,
     split_file: str,
     features_cache: str,
     min_channels: int,
 ):
     """Train MAPS baseline for cell type classification."""
+    # Seed everything (canonical mahmoodlab/MAPS trainer.py:81-101)
+    set_seed(seed)
+
     # Set device
     device = torch.device(device_num if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -271,7 +281,7 @@ def main(
                 "min_epochs": min_epochs,
                 "max_epochs": max_epochs,
                 "patience": patience,
-                "split_mode": split_mode,
+                "seed": seed,
             },
         )
 
@@ -337,10 +347,10 @@ def main(
     X_train_norm, train_mean, train_std = normalize_features(X_train)
     X_test_norm, _, _ = normalize_features(X_test, mean=train_mean, std=train_std)
 
-    # Convert to tensors
-    X_train_tensor = torch.from_numpy(X_train_norm.astype(np.float32))
+    # Convert to tensors (float64 to match canonical mahmoodlab/MAPS trainer.py:133)
+    X_train_tensor = torch.from_numpy(X_train_norm.astype(np.float64))
     y_train_tensor = torch.from_numpy(y_train.astype(np.int64))
-    X_test_tensor = torch.from_numpy(X_test_norm.astype(np.float32))
+    X_test_tensor = torch.from_numpy(X_test_norm.astype(np.float64))
 
     # Compute class weights for WeightedRandomSampler
     print("Computing class weights for balanced sampling...")
@@ -362,42 +372,50 @@ def main(
         num_workers=0,  # Features already in memory
     )
 
-    # Create model
+    # Create model (float64 to match canonical mahmoodlab/MAPS trainer.py:133)
     model = MAPSModel(
         input_dim=input_dim,
         num_classes=n_classes_compact,
         hidden_dim=hidden_dim,
         dropout=dropout,
-    ).to(device)
+    ).to(device, dtype=torch.float64)
 
     print(f"\nModel architecture:")
     print(f"  Input: {input_dim} -> Hidden: {hidden_dim} -> Output: {n_classes_compact}")
     print(f"  Dropout: {dropout}")
 
-    # Loss and optimizer
+    # Loss and optimizer (canonical mahmoodlab/MAPS uses constant LR; no scheduler)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs, eta_min=learning_rate * 0.01)
 
     # Training loop with early stopping
     print(f"\nTraining MAPS model (min {min_epochs}, max {max_epochs} epochs, patience {patience})...")
-    print(f"  LR schedule: cosine annealing {learning_rate} -> {learning_rate * 0.01}")
+    print(f"  LR schedule: constant lr={learning_rate}")
     best_val_loss = float("inf")
     best_macro_acc = 0.0
     epochs_without_improvement = 0
     best_epoch = 0
+    # Pre-define so torch.load(model_path) is reachable even if no improvement ever happens.
+    model_path = Path(f"models/maps_{model_name}.pth")
+    model_path.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(max_epochs):
         # Train
         train_loss = train_one_epoch(model, train_dataloader, criterion, optimizer, device)
-        scheduler.step()
 
-        # Evaluate
+        # Evaluate (no hierarchy collapse — paper-faithful flat per-class accuracy)
         y_true, y_pred, y_prob = evaluate(model, X_test_tensor, y_test, device)
         metrics = compute_baseline_metrics(
             y_true, y_pred, y_prob, n_classes_compact,
-            hierarchy=CELL_TYPE_HIERARCHY, ct2idx=compact_ct2idx,
         )
+        try:
+            from sklearn.metrics import roc_auc_score
+            metrics["auroc"] = float(roc_auc_score(
+                y_true, y_prob, multi_class="ovo",
+                labels=list(range(n_classes_compact)),
+            ))
+        except ValueError:
+            metrics["auroc"] = float("nan")
 
         # Compute validation loss
         model.eval()
@@ -410,7 +428,8 @@ def main(
         # Print progress every 10 epochs
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"Epoch {epoch + 1:4d}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}, "
-                  f"Macro Acc={metrics['macro_accuracy']:.4f}, Weighted Acc={metrics['weighted_accuracy']:.4f}")
+                  f"Macro Acc={metrics['macro_accuracy']:.4f}, Weighted Acc={metrics['weighted_accuracy']:.4f}, "
+                  f"AUROC={metrics['auroc']:.4f}")
 
         # Log to wandb
         if enable_wandb:
@@ -420,27 +439,24 @@ def main(
                 "val/loss": val_loss,
                 "test/macro_accuracy": metrics["macro_accuracy"],
                 "test/weighted_accuracy": metrics["weighted_accuracy"],
+                "test/auroc": metrics["auroc"],
             })
 
-        # Early stopping check — select on macro accuracy (consistent with transformer/CellSighter)
-        macro_acc = metrics["macro_accuracy"]
-        if macro_acc > best_macro_acc:
-            best_macro_acc = macro_acc
+        # Early stopping check — select on lowest val loss (canonical mahmoodlab/MAPS trainer.py:236-242)
+        if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_macro_acc = metrics["macro_accuracy"]
             best_epoch = epoch + 1
             epochs_without_improvement = 0
 
-            # Save best model
-            model_path = Path(f"models/maps_{model_name}.pth")
-            model_path.parent.mkdir(parents=True, exist_ok=True)
+            # Save best model with canonical key names (mahmoodlab/MAPS trainer.py:165-166)
             torch.save({
                 "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "train_mean": train_mean,
-                "train_std": train_std,
-                "macro_accuracy": best_macro_acc,
+                "model_parameters": model.state_dict(),
+                "train_data_mean": train_mean,
+                "train_data_std": train_std,
                 "val_loss": best_val_loss,
+                "macro_accuracy": best_macro_acc,
             }, model_path)
         else:
             epochs_without_improvement += 1
@@ -448,25 +464,33 @@ def main(
         # Check early stopping (only after min_epochs)
         if epoch >= min_epochs - 1 and epochs_without_improvement >= patience:
             print(f"\nEarly stopping at epoch {epoch + 1} (no improvement for {patience} epochs)")
-            print(f"Best epoch: {best_epoch}, Best Macro Acc: {best_macro_acc:.4f}, Best Val Loss: {best_val_loss:.4f}")
+            print(f"Best epoch: {best_epoch}, Best Val Loss: {best_val_loss:.4f}, Best Macro Acc: {best_macro_acc:.4f}")
             break
 
     # Load best model for final evaluation
     print(f"\nLoading best model from epoch {best_epoch}...")
     checkpoint = torch.load(model_path, weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_parameters"])
 
-    # Final evaluation
+    # Final evaluation (no hierarchy collapse — paper-faithful flat per-class accuracy)
     print("\nFinal evaluation on test set...")
     y_true_compact, y_pred_compact, y_prob_compact = evaluate(model, X_test_tensor, y_test, device)
     metrics = compute_baseline_metrics(
         y_true_compact, y_pred_compact, y_prob_compact, n_classes_compact,
-        hierarchy=CELL_TYPE_HIERARCHY, ct2idx=compact_ct2idx,
     )
+    try:
+        from sklearn.metrics import roc_auc_score
+        metrics["auroc"] = float(roc_auc_score(
+            y_true_compact, y_prob_compact, multi_class="ovo",
+            labels=list(range(n_classes_compact)),
+        ))
+    except ValueError:
+        metrics["auroc"] = float("nan")
 
     print(f"\nFinal Test Results:")
     print(f"  Macro Accuracy: {metrics['macro_accuracy']:.4f}")
     print(f"  Weighted Accuracy: {metrics['weighted_accuracy']:.4f}")
+    print(f"  AUROC: {metrics['auroc']:.4f}")
     print(f"  Best Epoch: {best_epoch}")
     print(f"  Best Val Loss: {best_val_loss:.4f}")
 
@@ -475,6 +499,7 @@ def main(
         wandb.log({
             "final/macro_accuracy": metrics["macro_accuracy"],
             "final/weighted_accuracy": metrics["weighted_accuracy"],
+            "final/auroc": metrics["auroc"],
             "final/best_epoch": best_epoch,
             "final/best_val_loss": best_val_loss,
         })
