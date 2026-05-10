@@ -288,11 +288,13 @@ def main(
     # Load config
     dct_config = TissueNetConfig(zarr_dir)
     num_classes = dct_config.NUM_CELLTYPES
-    input_dim = dct_config.NUM_MARKERS  # 269 features (globally aligned mean intensity per marker)
+    # input_dim = NUM_MARKERS + 1 (cellSize column appended, paper-faithful per
+    # canonical mahmoodlab/MAPS data_preprocessing/*.py and README §Datasets)
+    input_dim = dct_config.NUM_MARKERS + 1
 
     print(f"Loading data from {zarr_dir}")
     print(f"Number of cell types: {num_classes}")
-    print(f"Input features: {input_dim} (mean intensity per channel)")
+    print(f"Input features: {input_dim} (mean intensity per channel + cellSize)")
 
     # Convert to lists (click returns tuples)
     skip_datasets = list(skip_datasets) if skip_datasets else None
@@ -319,7 +321,14 @@ def main(
     test_fov_names = data["val_fov_names"]
     test_cell_indices = data["val_cell_indices"]
 
-    print(f"Training set: {X_train.shape[0]} samples, {X_train.shape[1]} features")
+    # Append cellSize as the last feature column (canonical mahmoodlab/MAPS
+    # data_preprocessing/*.py emits N markers + cellSize in dataset CSVs).
+    train_cell_sizes = data["train_cell_sizes"].astype(np.float32).reshape(-1, 1)
+    val_cell_sizes = data["val_cell_sizes"].astype(np.float32).reshape(-1, 1)
+    X_train = np.concatenate([X_train, train_cell_sizes], axis=1)
+    X_test = np.concatenate([X_test, val_cell_sizes], axis=1)
+
+    print(f"Training set: {X_train.shape[0]} samples, {X_train.shape[1]} features (markers + cellSize)")
     print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
 
     # Remap labels to contiguous 0-indexed (required for CrossEntropyLoss).
