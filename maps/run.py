@@ -24,8 +24,8 @@ from maps.model import MAPSModel
 # Default data directory from environment
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data2"))
 
-from deepcelltypes.config import TissueNetConfig, CELL_TYPE_HIERARCHY
-from deepcelltypes.utils import (
+from deepcell_types.training.config import TissueNetConfig, CELL_TYPE_HIERARCHY
+from deepcell_types.training.baseline_features import (
     compute_baseline_metrics,
     save_baseline_predictions,
     extract_features_from_zarr,
