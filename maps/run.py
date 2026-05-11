@@ -24,7 +24,7 @@ from maps.model import MAPSModel
 # Default data directory from environment
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data2"))
 
-from deepcelltypes.config import TissueNetConfig
+from deepcelltypes.config import TissueNetConfig, CELL_TYPE_HIERARCHY
 from deepcelltypes.utils import (
     compute_baseline_metrics,
     save_baseline_predictions,
@@ -412,10 +412,13 @@ def main(
         # Train
         train_loss = train_one_epoch(model, train_dataloader, criterion, optimizer, device)
 
-        # Evaluate (no hierarchy collapse — paper-faithful flat per-class accuracy)
+        # Evaluate with shared hierarchy collapse (Tcell + Stromal) — matches
+        # the main model's LossesAndMetrics.compute() exactly, so the reported
+        # numbers are directly comparable.
         y_true, y_pred, y_prob = evaluate(model, X_test_tensor, y_test, device)
         metrics = compute_baseline_metrics(
             y_true, y_pred, y_prob, n_classes_compact,
+            hierarchy=CELL_TYPE_HIERARCHY, ct2idx=compact_ct2idx,
         )
         try:
             from sklearn.metrics import roc_auc_score
@@ -438,6 +441,7 @@ def main(
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"Epoch {epoch + 1:4d}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}, "
                   f"Macro Acc={metrics['macro_accuracy']:.4f}, Weighted Acc={metrics['weighted_accuracy']:.4f}, "
+                  f"Macro F1={metrics['macro_f1']:.4f}, Weighted F1={metrics['weighted_f1']:.4f}, "
                   f"AUROC={metrics['auroc']:.4f}")
 
         # Log to wandb
@@ -448,6 +452,8 @@ def main(
                 "val/loss": val_loss,
                 "test/macro_accuracy": metrics["macro_accuracy"],
                 "test/weighted_accuracy": metrics["weighted_accuracy"],
+                "test/macro_f1": metrics["macro_f1"],
+                "test/weighted_f1": metrics["weighted_f1"],
                 "test/auroc": metrics["auroc"],
             })
 
@@ -481,11 +487,12 @@ def main(
     checkpoint = torch.load(model_path, weights_only=False)
     model.load_state_dict(checkpoint["model_parameters"])
 
-    # Final evaluation (no hierarchy collapse — paper-faithful flat per-class accuracy)
+    # Final evaluation with shared hierarchy collapse (matches main model)
     print("\nFinal evaluation on test set...")
     y_true_compact, y_pred_compact, y_prob_compact = evaluate(model, X_test_tensor, y_test, device)
     metrics = compute_baseline_metrics(
         y_true_compact, y_pred_compact, y_prob_compact, n_classes_compact,
+        hierarchy=CELL_TYPE_HIERARCHY, ct2idx=compact_ct2idx,
     )
     try:
         from sklearn.metrics import roc_auc_score
@@ -499,6 +506,8 @@ def main(
     print(f"\nFinal Test Results:")
     print(f"  Macro Accuracy: {metrics['macro_accuracy']:.4f}")
     print(f"  Weighted Accuracy: {metrics['weighted_accuracy']:.4f}")
+    print(f"  Macro F1: {metrics['macro_f1']:.4f}")
+    print(f"  Weighted F1: {metrics['weighted_f1']:.4f}")
     print(f"  AUROC: {metrics['auroc']:.4f}")
     print(f"  Best Epoch: {best_epoch}")
     print(f"  Best Val Loss: {best_val_loss:.4f}")
@@ -508,6 +517,8 @@ def main(
         wandb.log({
             "final/macro_accuracy": metrics["macro_accuracy"],
             "final/weighted_accuracy": metrics["weighted_accuracy"],
+            "final/macro_f1": metrics["macro_f1"],
+            "final/weighted_f1": metrics["weighted_f1"],
             "final/auroc": metrics["auroc"],
             "final/best_epoch": best_epoch,
             "final/best_val_loss": best_val_loss,
