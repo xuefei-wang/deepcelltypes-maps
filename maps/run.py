@@ -172,7 +172,7 @@ def evaluate(
 @click.option(
     "--zarr_dir",
     type=str,
-    default=str(DATA_DIR / "tissuenet-caitlin-labels.zarr"),
+    default=str(DATA_DIR),
 )
 @click.option(
     "--skip_datasets",
