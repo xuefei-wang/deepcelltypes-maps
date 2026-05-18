@@ -331,25 +331,31 @@ def main(
     print(f"Training set: {X_train.shape[0]} samples, {X_train.shape[1]} features (markers + cellSize)")
     print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
 
-    # Remap labels to contiguous 0-indexed (required for CrossEntropyLoss).
-    # Train labels must be contiguous [0..n_train-1]; test-only labels appended after.
-    train_unique = np.sort(np.unique(y_train))
-    label_to_compact = {orig: i for i, orig in enumerate(train_unique)}
-    next_idx = len(train_unique)
-    for label in np.sort(np.unique(y_test)):
-        if label not in label_to_compact:
-            label_to_compact[label] = next_idx
-            next_idx += 1
+    # Build a contiguous 0..N-1 output label space covering ALL archive cell
+    # types (sorted by ct2idx), not just those present in train. Previously
+    # this used ``np.sort(np.unique(y_train))`` (the canonical mahmoodlab/MAPS
+    # recipe), which produces an output head with fewer dims than
+    # ``len(ct2idx)`` whenever some archive classes have zero train support.
+    # That structurally prevents the model from ever predicting those classes
+    # at inference (their probability is identically zero), dragging macro-F1
+    # down by 5–10 pp without a corresponding macro_accuracy gain.
+    # Switching to the full sorted-ct2idx space adds a few unused output dims
+    # whose loss gradient is always zero (no positive examples) — no harm,
+    # and the saved ckpt is now a drop-in 51-class head that matches
+    # CellSighter / "ours" predictions schema.
+    sorted_ct = sorted(dct_config.ct2idx.values())
+    label_to_compact = {orig: i for i, orig in enumerate(sorted_ct)}
     compact_to_label = {i: orig for orig, i in label_to_compact.items()}
-    n_classes_compact = next_idx
+    n_classes_compact = len(sorted_ct)
     compact_ct2idx = {
-        name: label_to_compact[idx]
-        for name, idx in dct_config.ct2idx.items()
-        if idx in label_to_compact
+        name: label_to_compact[idx] for name, idx in dct_config.ct2idx.items()
     }
     y_train = np.array([label_to_compact[y] for y in y_train])
     y_test = np.array([label_to_compact[y] for y in y_test])
-    print(f"Unique cell types in data: {n_classes_compact} (of {num_classes} total)")
+    n_train_unique = int(len(np.unique(y_train)))
+    print(f"Output head: {n_classes_compact} classes (of {num_classes} total in ct2idx); "
+          f"{n_train_unique} have train cells, {n_classes_compact - n_train_unique} have zero-train-support "
+          f"and will receive no loss gradient.")
 
     # Z-score normalization (compute stats from training set only)
     print("\nNormalizing features (Z-score)...")
