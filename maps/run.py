@@ -155,7 +155,7 @@ def evaluate(
 
     # Process in batches
     for i in range(0, len(X), batch_size):
-        X_batch = X[i:i + batch_size].to(device)
+        X_batch = X[i : i + batch_size].to(device)
         _, probs = model(X_batch)  # Use probs for evaluation
         all_prob.append(probs.cpu().numpy())
 
@@ -213,29 +213,35 @@ def evaluate(
     help="Batch size for training",
 )
 @click.option(
-    "--min_epochs",
-    type=int,
-    default=100,
-    help="Minimum epochs before early stopping (canonical mahmoodlab/MAPS published recipes use 50 for cHL1, 100 for others)",
-)
-@click.option(
     "--max_epochs",
     type=int,
-    default=500,
-    help="Maximum epochs",
+    default=50,
+    help="Number of training epochs (default 50; runs the full count, best epoch selected on validation loss)",
 )
 @click.option(
-    "--patience",
+    "--seed",
     type=int,
-    default=50,
-    help="Early stopping patience (canonical mahmoodlab/MAPS published recipes use 20 for cHL1, 50 for others)",
+    default=7325111,
+    help="Random seed (canonical mahmoodlab/MAPS default)",
 )
-@click.option("--seed", type=int, default=7325111, help="Random seed (canonical mahmoodlab/MAPS default)")
-@click.option("--split_file", type=str, default=None,
-              help="Path to pre-computed FOV split JSON (required)")
-@click.option("--features_cache", type=str, default=None,
-              help="Path to cache extracted features (.npz). Reuses cache if it exists.")
-@click.option("--min_channels", type=int, default=3, help="Min non-DAPI channels per dataset (filters 2-channel datasets)")
+@click.option(
+    "--split_file",
+    type=str,
+    default=None,
+    help="Path to pre-computed FOV split JSON (required)",
+)
+@click.option(
+    "--features_cache",
+    type=str,
+    default=None,
+    help="Path to cache extracted features (.npz). Reuses cache if it exists.",
+)
+@click.option(
+    "--min_channels",
+    type=int,
+    default=3,
+    help="Min non-DAPI channels per dataset (filters 2-channel datasets)",
+)
 def main(
     model_name: str,
     device_num: str,
@@ -247,9 +253,7 @@ def main(
     dropout: float,
     learning_rate: float,
     batch_size: int,
-    min_epochs: int,
     max_epochs: int,
-    patience: int,
     seed: int,
     split_file: str,
     features_cache: str,
@@ -266,6 +270,7 @@ def main(
     # Initialize wandb if enabled
     if enable_wandb:
         import wandb
+
         wandb.login()
         run = wandb.init(
             project="deepcelltypes-temp-train",
@@ -278,9 +283,7 @@ def main(
                 "dropout": dropout,
                 "learning_rate": learning_rate,
                 "batch_size": batch_size,
-                "min_epochs": min_epochs,
                 "max_epochs": max_epochs,
-                "patience": patience,
                 "seed": seed,
             },
         )
@@ -301,7 +304,9 @@ def main(
     keep_datasets = list(keep_datasets) if keep_datasets else None
 
     if split_file is None:
-        raise click.UsageError("--split_file is required. Generate one with: python -m scripts.generate_splits")
+        raise click.UsageError(
+            "--split_file is required. Generate one with: python -m scripts.generate_splits"
+        )
 
     # Extract features directly from zarr (fast path, no DataLoader overhead)
     print("\nExtracting features from zarr...")
@@ -328,7 +333,9 @@ def main(
     X_train = np.concatenate([X_train, train_cell_sizes], axis=1)
     X_test = np.concatenate([X_test, val_cell_sizes], axis=1)
 
-    print(f"Training set: {X_train.shape[0]} samples, {X_train.shape[1]} features (markers + cellSize)")
+    print(
+        f"Training set: {X_train.shape[0]} samples, {X_train.shape[1]} features (markers + cellSize)"
+    )
     print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
 
     # Build a contiguous 0..N-1 output label space covering ALL archive cell
@@ -353,9 +360,11 @@ def main(
     y_train = np.array([label_to_compact[y] for y in y_train])
     y_test = np.array([label_to_compact[y] for y in y_test])
     n_train_unique = int(len(np.unique(y_train)))
-    print(f"Output head: {n_classes_compact} classes (of {num_classes} total in ct2idx); "
-          f"{n_train_unique} have train cells, {n_classes_compact - n_train_unique} have zero-train-support "
-          f"and will receive no loss gradient.")
+    print(
+        f"Output head: {n_classes_compact} classes (of {num_classes} total in ct2idx); "
+        f"{n_train_unique} have train cells, {n_classes_compact - n_train_unique} have zero-train-support "
+        f"and will receive no loss gradient."
+    )
 
     # Z-score normalization (compute stats from training set only)
     print("\nNormalizing features (Z-score)...")
@@ -396,19 +405,21 @@ def main(
     ).to(device, dtype=torch.float64)
 
     print(f"\nModel architecture:")
-    print(f"  Input: {input_dim} -> Hidden: {hidden_dim} -> Output: {n_classes_compact}")
+    print(
+        f"  Input: {input_dim} -> Hidden: {hidden_dim} -> Output: {n_classes_compact}"
+    )
     print(f"  Dropout: {dropout}")
 
     # Loss and optimizer (canonical mahmoodlab/MAPS uses constant LR; no scheduler)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    # Training loop with early stopping
-    print(f"\nTraining MAPS model (min {min_epochs}, max {max_epochs} epochs, patience {patience})...")
+    # Training loop — runs the full max_epochs (no early stopping); the best
+    # epoch is selected on validation loss.
+    print(f"\nTraining MAPS model for {max_epochs} epochs (best-by-val-loss)...")
     print(f"  LR schedule: constant lr={learning_rate}")
     best_val_loss = float("inf")
     best_macro_acc = 0.0
-    epochs_without_improvement = 0
     best_epoch = 0
     # Pre-define so torch.load(model_path) is reachable even if no improvement ever happens.
     model_path = Path(f"models/maps_{model_name}.pth")
@@ -416,22 +427,33 @@ def main(
 
     for epoch in range(max_epochs):
         # Train
-        train_loss = train_one_epoch(model, train_dataloader, criterion, optimizer, device)
+        train_loss = train_one_epoch(
+            model, train_dataloader, criterion, optimizer, device
+        )
 
         # Evaluate with shared hierarchy collapse (Tcell + Stromal) — matches
         # the main model's LossesAndMetrics.compute() exactly, so the reported
         # numbers are directly comparable.
         y_true, y_pred, y_prob = evaluate(model, X_test_tensor, y_test, device)
         metrics = compute_baseline_metrics(
-            y_true, y_pred, y_prob, n_classes_compact,
-            hierarchy=CELL_TYPE_HIERARCHY, ct2idx=compact_ct2idx,
+            y_true,
+            y_pred,
+            y_prob,
+            n_classes_compact,
+            hierarchy=CELL_TYPE_HIERARCHY,
+            ct2idx=compact_ct2idx,
         )
         try:
             from sklearn.metrics import roc_auc_score
-            metrics["auroc"] = float(roc_auc_score(
-                y_true, y_prob, multi_class="ovo",
-                labels=list(range(n_classes_compact)),
-            ))
+
+            metrics["auroc"] = float(
+                roc_auc_score(
+                    y_true,
+                    y_prob,
+                    multi_class="ovo",
+                    labels=list(range(n_classes_compact)),
+                )
+            )
         except ValueError:
             metrics["auroc"] = float("nan")
 
@@ -445,48 +467,47 @@ def main(
 
         # Print progress every 10 epochs
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"Epoch {epoch + 1:4d}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}, "
-                  f"Macro Acc={metrics['macro_accuracy']:.4f}, Weighted Acc={metrics['weighted_accuracy']:.4f}, "
-                  f"Macro F1={metrics['macro_f1']:.4f}, Weighted F1={metrics['weighted_f1']:.4f}, "
-                  f"AUROC={metrics['auroc']:.4f}")
+            print(
+                f"Epoch {epoch + 1:4d}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}, "
+                f"Macro Acc={metrics['macro_accuracy']:.4f}, Weighted Acc={metrics['weighted_accuracy']:.4f}, "
+                f"Macro F1={metrics['macro_f1']:.4f}, Weighted F1={metrics['weighted_f1']:.4f}, "
+                f"AUROC={metrics['auroc']:.4f}"
+            )
 
         # Log to wandb
         if enable_wandb:
-            wandb.log({
-                "epoch": epoch + 1,
-                "train/loss": train_loss,
-                "val/loss": val_loss,
-                "test/macro_accuracy": metrics["macro_accuracy"],
-                "test/weighted_accuracy": metrics["weighted_accuracy"],
-                "test/macro_f1": metrics["macro_f1"],
-                "test/weighted_f1": metrics["weighted_f1"],
-                "test/auroc": metrics["auroc"],
-            })
+            wandb.log(
+                {
+                    "epoch": epoch + 1,
+                    "train/loss": train_loss,
+                    "val/loss": val_loss,
+                    "test/macro_accuracy": metrics["macro_accuracy"],
+                    "test/weighted_accuracy": metrics["weighted_accuracy"],
+                    "test/macro_f1": metrics["macro_f1"],
+                    "test/weighted_f1": metrics["weighted_f1"],
+                    "test/auroc": metrics["auroc"],
+                }
+            )
 
-        # Early stopping check — select on lowest val loss (canonical mahmoodlab/MAPS trainer.py:236-242)
+        # Model selection — keep the checkpoint with the lowest val loss
+        # (canonical mahmoodlab/MAPS trainer.py:236-242).
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_macro_acc = metrics["macro_accuracy"]
             best_epoch = epoch + 1
-            epochs_without_improvement = 0
 
             # Save best model with canonical key names (mahmoodlab/MAPS trainer.py:165-166)
-            torch.save({
-                "epoch": epoch + 1,
-                "model_parameters": model.state_dict(),
-                "train_data_mean": train_mean,
-                "train_data_std": train_std,
-                "val_loss": best_val_loss,
-                "macro_accuracy": best_macro_acc,
-            }, model_path)
-        else:
-            epochs_without_improvement += 1
-
-        # Check early stopping (only after min_epochs)
-        if epoch >= min_epochs - 1 and epochs_without_improvement >= patience:
-            print(f"\nEarly stopping at epoch {epoch + 1} (no improvement for {patience} epochs)")
-            print(f"Best epoch: {best_epoch}, Best Val Loss: {best_val_loss:.4f}, Best Macro Acc: {best_macro_acc:.4f}")
-            break
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_parameters": model.state_dict(),
+                    "train_data_mean": train_mean,
+                    "train_data_std": train_std,
+                    "val_loss": best_val_loss,
+                    "macro_accuracy": best_macro_acc,
+                },
+                model_path,
+            )
 
     # Load best model for final evaluation
     print(f"\nLoading best model from epoch {best_epoch}...")
@@ -495,17 +516,28 @@ def main(
 
     # Final evaluation with shared hierarchy collapse (matches main model)
     print("\nFinal evaluation on test set...")
-    y_true_compact, y_pred_compact, y_prob_compact = evaluate(model, X_test_tensor, y_test, device)
+    y_true_compact, y_pred_compact, y_prob_compact = evaluate(
+        model, X_test_tensor, y_test, device
+    )
     metrics = compute_baseline_metrics(
-        y_true_compact, y_pred_compact, y_prob_compact, n_classes_compact,
-        hierarchy=CELL_TYPE_HIERARCHY, ct2idx=compact_ct2idx,
+        y_true_compact,
+        y_pred_compact,
+        y_prob_compact,
+        n_classes_compact,
+        hierarchy=CELL_TYPE_HIERARCHY,
+        ct2idx=compact_ct2idx,
     )
     try:
         from sklearn.metrics import roc_auc_score
-        metrics["auroc"] = float(roc_auc_score(
-            y_true_compact, y_prob_compact, multi_class="ovo",
-            labels=list(range(n_classes_compact)),
-        ))
+
+        metrics["auroc"] = float(
+            roc_auc_score(
+                y_true_compact,
+                y_prob_compact,
+                multi_class="ovo",
+                labels=list(range(n_classes_compact)),
+            )
+        )
     except ValueError:
         metrics["auroc"] = float("nan")
 
@@ -520,15 +552,17 @@ def main(
 
     # Log final metrics to wandb
     if enable_wandb:
-        wandb.log({
-            "final/macro_accuracy": metrics["macro_accuracy"],
-            "final/weighted_accuracy": metrics["weighted_accuracy"],
-            "final/macro_f1": metrics["macro_f1"],
-            "final/weighted_f1": metrics["weighted_f1"],
-            "final/auroc": metrics["auroc"],
-            "final/best_epoch": best_epoch,
-            "final/best_val_loss": best_val_loss,
-        })
+        wandb.log(
+            {
+                "final/macro_accuracy": metrics["macro_accuracy"],
+                "final/weighted_accuracy": metrics["weighted_accuracy"],
+                "final/macro_f1": metrics["macro_f1"],
+                "final/weighted_f1": metrics["weighted_f1"],
+                "final/auroc": metrics["auroc"],
+                "final/best_epoch": best_epoch,
+                "final/best_val_loss": best_val_loss,
+            }
+        )
 
     # Map probabilities to ct2idx-sorted columns for saving
     # save_baseline_predictions expects y_prob with len(ct2idx) columns,
@@ -537,7 +571,9 @@ def main(
     sorted_ct_values = sorted(dct_config.ct2idx.values())
     ct_value_to_col = {v: i for i, v in enumerate(sorted_ct_values)}
     n_model_classes = y_prob_compact.shape[1]
-    y_prob_orig = np.zeros((len(y_true_compact), len(dct_config.ct2idx)), dtype=np.float32)
+    y_prob_orig = np.zeros(
+        (len(y_true_compact), len(dct_config.ct2idx)), dtype=np.float32
+    )
     for compact_idx, orig_idx in compact_to_label.items():
         if compact_idx < n_model_classes and orig_idx in ct_value_to_col:
             y_prob_orig[:, ct_value_to_col[orig_idx]] = y_prob_compact[:, compact_idx]

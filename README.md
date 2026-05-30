@@ -32,9 +32,7 @@ python -m maps --model_name maps_0 --device_num cuda:0 --split_file splits/fov_s
 - `--dropout`: Dropout rate (default: `0.25`)
 - `--learning_rate`: Learning rate (default: `0.001`)
 - `--batch_size`: Training batch size (default: `128`)
-- `--min_epochs`: Minimum epochs before early stopping (default: `250`)
-- `--max_epochs`: Maximum training epochs (default: `500`)
-- `--patience`: Early stopping patience (default: `100`)
+- `--max_epochs`: Number of training epochs (default: `50`; runs the full count, best epoch selected on validation loss)
 - `--split_file`: Path to pre-computed FOV split JSON (required)
 - `--features_cache`: Path to cache extracted features as `.npz`
 - `--min_channels`: Minimum non-DAPI channels per dataset (default: `3`)
